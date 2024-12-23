@@ -7,6 +7,9 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
+	"time"
 
 	_ "github.com/mattn/go-sqlite3"
 )
@@ -16,59 +19,106 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
-
 	port := os.Getenv("TODO_PORT")
 	if port == "" {
 		port = "7540"
 	}
 
 	http.HandleFunc("/", Handler)
-	fmt.Printf("Сервер запущен на :%s\n", port)
-	if err := http.ListenAndServe(":"+port, nil); err != nil {
-		fmt.Println("Ошибка запуска сервера:", err)
-	}
 
-	// Получение пути к исполняемому файлу
-	appPath, err := os.Executable()
-	if err != nil {
-		log.Fatal(err)
-	}
+	// Создаем путь к базе данных в корне проекта
+	dbFile := filepath.Join(".", "scheduler.db")
+	fmt.Println("Путь к базе данных:", dbFile)
 
-	// Определение пути к файлу базы данных
-	dbFile := filepath.Join(filepath.Dir(appPath), "scheduler.db")
-
-	// Проверка существования файла базы данных
-	_, err = os.Stat(dbFile)
+	_, err := os.Stat(dbFile)
 
 	var install bool
 	if err != nil {
 		install = true
 	}
 
-	// Открытие соединения с базой данных
 	db, err := sql.Open("sqlite3", dbFile)
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer db.Close()
 
-	// Если install равно true, создаем таблицы и индексы
-	if install {
-		// SQL-запрос для создания таблицы
+	var tableExists bool
+	err = db.QueryRow("SELECT count(*) > 0 FROM sqlite_master WHERE type='table' AND name='tasks';").Scan(&tableExists)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	if !tableExists {
+		fmt.Println("Таблица 'tasks' не существует, создаем ее...")
 		createTableSQL := `CREATE TABLE IF NOT EXISTS tasks (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            completed BOOLEAN NOT NULL DEFAULT FALSE
-        );`
-
-		// Выполняем запрос
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        completed BOOLEAN NOT NULL DEFAULT FALSE
+      );`
 		if _, err := db.Exec(createTableSQL); err != nil {
-			log.Fatal(err)
+			log.Fatalf("Ошибка при создании таблицы: %v", err)
 		}
-
-		// Здесь можно добавить запросы для создания индексов, если это нужно
 		fmt.Println("База данных создана и таблицы добавлены.")
 	} else {
-		fmt.Println("База данных уже существует.")
+		fmt.Println("База данных и таблица уже существуют.")
 	}
+
+	if install {
+		fmt.Println("База данных не существовала, она была создана.")
+	}
+
+	fmt.Printf("Сервер запущен на :%s\n", port)
+	if err := http.ListenAndServe(":"+port, nil); err != nil {
+		fmt.Println("Ошибка запуска сервера:", err)
+	}
+}
+func isLeapYear(year int) bool {
+	return (year%4 == 0 && year%100 != 0) || (year%400 == 0)
+}
+
+func NextDate(now time.Time, date string, repeat string) (string, error) {
+	if repeat == "" {
+		return "", fmt.Errorf("пустое правило повторения")
+	}
+
+	parsedDate, err := time.Parse("20060102", date)
+	if err != nil {
+		return "", fmt.Errorf("некорректная дата: %s", date)
+	}
+
+	var nextDate time.Time
+	nextDate = parsedDate
+
+	switch {
+	case strings.HasPrefix(repeat, "d "):
+		daysStr := strings.TrimSpace(strings.TrimPrefix(repeat, "d "))
+		days, err := strconv.Atoi(daysStr)
+		if err != nil || days <= 0 || days > 400 {
+			return "", fmt.Errorf("недопустимый интервал дней: %s", daysStr)
+		}
+
+		for nextDate.Before(now) || nextDate.Equal(now) {
+			nextDate = nextDate.AddDate(0, 0, days)
+		}
+
+	case repeat == "y":
+		nextDate = parsedDate.AddDate(1, 0, 0)
+
+		// Проверяем, была ли дата 29 февраля
+		if parsedDate.Day() == 29 && parsedDate.Month() == 2 {
+			if !isLeapYear(nextDate.Year()) {
+				nextDate = time.Date(nextDate.Year(), 3, 1, 0, 0, 0, 0, nextDate.Location())
+			}
+		}
+
+	default:
+		return "", fmt.Errorf("неподдерживаемый формат: %s", repeat)
+	}
+
+	if nextDate.Before(now) || nextDate.Equal(now) {
+		return "", fmt.Errorf("следующая дата должна быть больше текущей")
+	}
+
+	return nextDate.Format("20060102"), nil
 }
