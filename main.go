@@ -73,6 +73,7 @@ func main() {
 		fmt.Println("Ошибка запуска сервера:", err)
 	}
 }
+
 func isLeapYear(year int) bool {
 	return (year%4 == 0 && year%100 != 0) || (year%400 == 0)
 }
@@ -87,8 +88,7 @@ func NextDate(now time.Time, date string, repeat string) (string, error) {
 		return "", fmt.Errorf("некорректная дата: %s", date)
 	}
 
-	var nextDate time.Time
-	nextDate = parsedDate
+	nextDate := parsedDate
 
 	switch {
 	case strings.HasPrefix(repeat, "d "):
@@ -103,13 +103,26 @@ func NextDate(now time.Time, date string, repeat string) (string, error) {
 		}
 
 	case repeat == "y":
-		nextDate = parsedDate.AddDate(1, 0, 0)
-
-		// Проверяем, была ли дата 29 февраля
+		// Обработка перехода с 29 февраля
 		if parsedDate.Day() == 29 && parsedDate.Month() == 2 {
+			nextDate = parsedDate.AddDate(1, 0, 0) // Сначала переходим на следующий год
 			if !isLeapYear(nextDate.Year()) {
-				nextDate = time.Date(nextDate.Year(), 3, 1, 0, 0, 0, 0, nextDate.Location())
+				nextDate = time.Date(nextDate.Year(), 2, 28, 0, 0, 0, 0, nextDate.Location())
 			}
+		} else {
+			nextDate = parsedDate.AddDate(1, 0, 0) // Просто добавляем 1 год
+		}
+
+		// Обработка 31 числа
+		if parsedDate.Day() == 31 {
+			lastDayOfNextMonth := time.Date(
+				nextDate.Year(),
+				nextDate.Month()+1,
+				0,
+				0, 0, 0, 0,
+				nextDate.Location(),
+			)
+			nextDate = lastDayOfNextMonth
 		}
 
 	default:
