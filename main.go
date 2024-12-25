@@ -74,15 +74,10 @@ func main() {
 	}
 }
 
-func isLeapYear(year int) bool {
-	return (year%4 == 0 && year%100 != 0) || (year%400 == 0)
-}
-
 func NextDate(now time.Time, date string, repeat string) (string, error) {
 	if repeat == "" {
 		return "", fmt.Errorf("пустое правило повторения")
 	}
-
 	parsedDate, err := time.Parse("20060102", date)
 	if err != nil {
 		return "", fmt.Errorf("некорректная дата: %s", date)
@@ -97,41 +92,34 @@ func NextDate(now time.Time, date string, repeat string) (string, error) {
 		if err != nil || days <= 0 || days > 400 {
 			return "", fmt.Errorf("недопустимый интервал дней: %s", daysStr)
 		}
-
-		for nextDate.Before(now) || nextDate.Equal(now) {
-			nextDate = nextDate.AddDate(0, 0, days)
-		}
+		nextDate = nextDate.AddDate(0, 0, days)
 
 	case repeat == "y":
-		// Обработка перехода с 29 февраля
-		if parsedDate.Day() == 29 && parsedDate.Month() == 2 {
-			nextDate = parsedDate.AddDate(1, 0, 0) // Сначала переходим на следующий год
-			if !isLeapYear(nextDate.Year()) {
+		if parsedDate.Month() == 2 && parsedDate.Day() == 29 {
+			nextDate = parsedDate.AddDate(1, 0, 0)
+			if isLeapYear(nextDate.Year()) {
+				nextDate = time.Date(nextDate.Year(), 2, 29, 0, 0, 0, 0, nextDate.Location())
+			} else {
 				nextDate = time.Date(nextDate.Year(), 2, 28, 0, 0, 0, 0, nextDate.Location())
 			}
 		} else {
-			nextDate = parsedDate.AddDate(1, 0, 0) // Просто добавляем 1 год
-		}
-
-		// Обработка 31 числа
-		if parsedDate.Day() == 31 {
-			lastDayOfNextMonth := time.Date(
-				nextDate.Year(),
-				nextDate.Month()+1,
-				0,
-				0, 0, 0, 0,
-				nextDate.Location(),
-			)
-			nextDate = lastDayOfNextMonth
+			nextDate = parsedDate.AddDate(1, 0, 0)
+			if parsedDate.Day() == 31 {
+				nextDate = time.Date(nextDate.Year(), nextDate.Month()+1, 0, 0, 0, 0, 0, nextDate.Location())
+			}
 		}
 
 	default:
 		return "", fmt.Errorf("неподдерживаемый формат: %s", repeat)
 	}
 
-	if nextDate.Before(now) || nextDate.Equal(now) {
+	if !nextDate.After(now) {
 		return "", fmt.Errorf("следующая дата должна быть больше текущей")
 	}
 
 	return nextDate.Format("20060102"), nil
+}
+
+func isLeapYear(year int) bool {
+	return (year%4 == 0 && year%100 != 0) || (year%400 == 0)
 }
