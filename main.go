@@ -2,6 +2,7 @@ package main
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -14,27 +15,33 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 )
 
+type Task struct {
+	Date    string `json:"date"`
+	Title   string `json:"title"`
+	Comment string `json:"comment,omitempty"`
+	Repeat  string `json:"repeat,omitempty"`
+}
+
+type TaskResponse struct {
+	ID    int    `json:"id,omitempty"`
+	Error string `json:"error,omitempty"`
+}
+
 func main() {
 	port := os.Getenv("TODO_PORT")
 	if port == "" {
 		port = "7540"
 	}
 
-	// Указываем директорию с веб-файлами
 	webDir := "./web"
-
-	// Настраиваем обработчик файлового сервера
 	http.Handle("/", http.FileServer(http.Dir(webDir)))
 
-	// Создаем путь к базе данных в корне проекта
 	dbFile := filepath.Join(".", "scheduler.db")
 	fmt.Println("Путь к базе данных:", dbFile)
 
 	_, err := os.Stat(dbFile)
-
-	var install bool
 	if err != nil {
-		install = true
+		log.Println("Файл базы данных не найден:", err)
 	}
 
 	db, err := sql.Open("sqlite3", dbFile)
@@ -43,35 +50,126 @@ func main() {
 	}
 	defer db.Close()
 
-	var tableExists bool
-	err = db.QueryRow("SELECT count(*) > 0 FROM sqlite_master WHERE type='table' AND name='tasks';").Scan(&tableExists)
-	if err != nil {
+	if err := createTasksTable(db); err != nil {
 		log.Fatal(err)
 	}
 
-	if !tableExists {
-		fmt.Println("Таблица 'tasks' не существует, создаем ее...")
-		createTableSQL := `CREATE TABLE IF NOT EXISTS tasks (
-	  id INTEGER PRIMARY KEY AUTOINCREMENT,
-	  name TEXT NOT NULL,
-	  completed BOOLEAN NOT NULL DEFAULT FALSE
-	 );`
-		if _, err := db.Exec(createTableSQL); err != nil {
-			log.Fatalf("Ошибка при создании таблицы: %v", err)
-		}
-		fmt.Println("База данных создана и таблицы добавлены.")
-	} else {
-		fmt.Println("База данных и таблица уже существуют.")
-	}
+	http.HandleFunc("/api/task", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json; charset=UTF-8")
 
-	if install {
-		fmt.Println("База данных не существовала, она была создана.")
-	}
+		switch r.Method {
+		case http.MethodPost:
+			handleAddTask(w, r, db)
+		case http.MethodGet:
+			handleGetTask(w, r, db)
+		case http.MethodDelete:
+			handleDeleteTask(w, r, db)
+		default:
+			http.Error(w, "Метод не поддерживается", http.StatusMethodNotAllowed)
+		}
+	})
 
 	fmt.Printf("Сервер запущен на http://localhost:%s\n", port)
 	if err := http.ListenAndServe(":"+port, nil); err != nil {
-		fmt.Println("Ошибка запуска сервера:", err)
+		log.Println("Ошибка запуска сервера:", err)
 	}
+}
+
+func createTasksTable(db *sql.DB) error {
+	createTableSQL := `CREATE TABLE IF NOT EXISTS tasks (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        date TEXT NOT NULL,
+        comment TEXT,
+        repeat TEXT
+    );`
+	_, err := db.Exec(createTableSQL)
+	return err
+}
+
+func handleAddTask(w http.ResponseWriter, r *http.Request, db *sql.DB) {
+	var task Task
+	if err := json.NewDecoder(r.Body).Decode(&task); err != nil {
+		http.Error(w, "Ошибка десериализации JSON", http.StatusBadRequest)
+		return
+	}
+
+	if task.Title == "" {
+		json.NewEncoder(w).Encode(TaskResponse{Error: "Не указан заголовок задачи"})
+		return
+	}
+
+	if task.Date == "" {
+		task.Date = time.Now().Format("20060102")
+	}
+	parsedDate, err := time.Parse("20060102", task.Date)
+	if err != nil {
+		json.NewEncoder(w).Encode(TaskResponse{Error: "Неверный формат даты"})
+		return
+	}
+
+	today := time.Now()
+	if parsedDate.Before(today) {
+		if task.Repeat == "" {
+			task.Date = today.Format("20060102")
+		} else {
+			nextDate, err := NextDate(today, task.Date, task.Repeat)
+			if err != nil {
+				json.NewEncoder(w).Encode(TaskResponse{Error: "Неверное правило повторения"})
+				return
+			}
+			task.Date = nextDate
+		}
+	}
+
+	res, err := db.Exec("INSERT INTO tasks (name, date, comment, repeat) VALUES (?, ?, ?, ?)", task.Title, task.Date, task.Comment, task.Repeat)
+	if err != nil {
+		http.Error(w, "Ошибка добавления задачи в базу данных", http.StatusInternalServerError)
+		return
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		http.Error(w, "Ошибка получения ID задачи", http.StatusInternalServerError)
+		return
+	}
+	json.NewEncoder(w).Encode(TaskResponse{ID: int(id)})
+}
+
+func handleGetTask(w http.ResponseWriter, r *http.Request, db *sql.DB) {
+	taskId := r.URL.Query().Get("id")
+	if taskId == "" {
+		http.Error(w, "Не указан ID задачи", http.StatusBadRequest)
+		return
+	}
+
+	var task Task
+	err := db.QueryRow("SELECT name, date, comment, repeat FROM tasks WHERE id = ?", taskId).Scan(&task.Title, &task.Date, &task.Comment, &task.Repeat)
+	if err != nil {
+		http.Error(w, "Задача не найдена", http.StatusNotFound)
+		return
+	}
+	json.NewEncoder(w).Encode(task)
+}
+
+func handleDeleteTask(w http.ResponseWriter, r *http.Request, db *sql.DB) {
+	taskId := r.URL.Query().Get("id")
+	if taskId == "" {
+		http.Error(w, "Не указан ID задачи", http.StatusBadRequest)
+		return
+	}
+
+	_, err := db.Exec("DELETE FROM tasks WHERE id = ?", taskId)
+	if err != nil {
+		http.Error(w, "Ошибка удаления задачи", http.StatusInternalServerError)
+		return
+	}
+	idInt, err := strconv.Atoi(taskId)
+	if err != nil {
+		http.Error(w, "Некорректный формат ID задачи", http.StatusBadRequest)
+		return
+	}
+	json.NewEncoder(w).Encode(TaskResponse{ID: idInt})
+
 }
 
 func NextDate(now time.Time, date string, repeat string) (string, error) {
