@@ -96,15 +96,15 @@ func NextDate(now time.Time, date string, repeat string) (string, error) {
 
 	case repeat == "y":
 		if parsedDate.Month() == 2 && parsedDate.Day() == 29 {
+			// Если дата - 29 февраля, добавляем 1 год
 			nextDate = parsedDate.AddDate(1, 0, 0)
-			if isLeapYear(nextDate.Year()) {
-				nextDate = time.Date(nextDate.Year(), 2, 29, 0, 0, 0, 0, nextDate.Location())
-			} else {
+			if !isLeapYear(nextDate.Year()) {
 				nextDate = time.Date(nextDate.Year(), 2, 28, 0, 0, 0, 0, nextDate.Location())
 			}
 		} else {
 			nextDate = parsedDate.AddDate(1, 0, 0)
 			if parsedDate.Day() == 31 {
+				// Переход на конец месяца
 				nextDate = time.Date(nextDate.Year(), nextDate.Month()+1, 0, 0, 0, 0, 0, nextDate.Location())
 			}
 		}
