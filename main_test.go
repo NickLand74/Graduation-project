@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -13,28 +14,77 @@ import (
 )
 
 func TestHandler(t *testing.T) {
-	// Создаем новый запрос
-	req, err := http.NewRequest("GET", "/", nil)
-	if err != nil {
+	// Создаем временные каталоги и файлы для тестирования
+	os.MkdirAll("web/js", os.ModePerm)
+	os.MkdirAll("web/css", os.ModePerm)
+	defer os.RemoveAll("web") // Удаляем временные файлы после теста
+
+	// Создаем файл index.html
+	indexHTML := []byte("<html><head><link rel=\"stylesheet\" type=\"text/css\" href=\"/css/style.css\"></head><body><h1>Hello, world!</h1><script src=\"/js/scripts.min.js\"></script></body></html>")
+	if err := os.WriteFile("web/index.html", indexHTML, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Создаем файл style.css
+	cssContent := []byte("body { background-color: #fff; }")
+	if err := os.WriteFile("web/css/style.css", cssContent, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Создаем файл scripts.min.js
+	jsContent := []byte("console.log('Hello, world!');")
+	if err := os.WriteFile("web/js/scripts.min.js", jsContent, 0644); err != nil {
 		t.Fatal(err)
 	}
 
 	// Запускаем тестовый сервер
 	rec := httptest.NewRecorder()
-	handler := http.HandlerFunc(Handler)
-
-	// Вызываем обработчик
+	req, err := http.NewRequest("GET", "/", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := http.FileServer(http.Dir("./web"))
 	handler.ServeHTTP(rec, req)
 
-	// Проверяем статус-код
+	// Проверяем статус-код для index.html
 	if status := rec.Code; status != http.StatusOK {
-		t.Errorf("Неверный статус-код: ожидался %v, получен %v", http.StatusOK, status)
+		t.Errorf("Неверный статус-код для index.html: ожидается %v, получен %v", http.StatusOK, status)
 	}
 
-	// Проверяем тело ответа
-	expected := "Hello, world!\n"
-	if rec.Body.String() != expected {
-		t.Errorf("Неверное тело ответа: ожидалось %v, получено %v", expected, rec.Body.String())
+	// Проверяем тело ответа для index.html
+	expectedBody := "<html><head><link rel=\"stylesheet\" type=\"text/css\" href=\"/css/style.css\"></head><body><h1>Hello, world!</h1><script src=\"/js/scripts.min.js\"></script></body></html>"
+	if strings.TrimSpace(rec.Body.String()) != expectedBody {
+		t.Errorf("Неверное тело ответа для index.html: ожидалось %v, получено %v", expectedBody, rec.Body.String())
+	}
+
+	// Тест для проверки файла style.css
+	rec = httptest.NewRecorder()
+	req, err = http.NewRequest("GET", "/css/style.css", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler.ServeHTTP(rec, req)
+
+	if status := rec.Code; status != http.StatusOK {
+		t.Errorf("Неверный статус-код для style.css: ожидается %v, получен %v", http.StatusOK, status)
+	}
+	if rec.Body.String() != string(cssContent) {
+		t.Errorf("Неверное тело ответа для style.css: ожидалось %v, получено %v", string(cssContent), rec.Body.String())
+	}
+
+	// Тест для проверки файла scripts.min.js
+	rec = httptest.NewRecorder()
+	req, err = http.NewRequest("GET", "/js/scripts.min.js", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler.ServeHTTP(rec, req)
+
+	if status := rec.Code; status != http.StatusOK {
+		t.Errorf("Неверный статус-код для scripts.min.js: ожидается %v, получен %v", http.StatusOK, status)
+	}
+	if rec.Body.String() != string(jsContent) {
+		t.Errorf("Неверное тело ответа для scripts.min.js: ожидалось %v, получено %v", string(jsContent), rec.Body.String())
 	}
 }
 

@@ -14,17 +14,17 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 )
 
-func Handler(w http.ResponseWriter, r *http.Request) {
-	fmt.Fprintln(w, "Hello, world!")
-}
-
 func main() {
 	port := os.Getenv("TODO_PORT")
 	if port == "" {
 		port = "7540"
 	}
 
-	http.HandleFunc("/", Handler)
+	// Указываем директорию с веб-файлами
+	webDir := "./web"
+
+	// Настраиваем обработчик файлового сервера
+	http.Handle("/", http.FileServer(http.Dir(webDir)))
 
 	// Создаем путь к базе данных в корне проекта
 	dbFile := filepath.Join(".", "scheduler.db")
@@ -52,10 +52,10 @@ func main() {
 	if !tableExists {
 		fmt.Println("Таблица 'tasks' не существует, создаем ее...")
 		createTableSQL := `CREATE TABLE IF NOT EXISTS tasks (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT NOT NULL,
-        completed BOOLEAN NOT NULL DEFAULT FALSE
-      );`
+	  id INTEGER PRIMARY KEY AUTOINCREMENT,
+	  name TEXT NOT NULL,
+	  completed BOOLEAN NOT NULL DEFAULT FALSE
+	 );`
 		if _, err := db.Exec(createTableSQL); err != nil {
 			log.Fatalf("Ошибка при создании таблицы: %v", err)
 		}
@@ -68,7 +68,7 @@ func main() {
 		fmt.Println("База данных не существовала, она была создана.")
 	}
 
-	fmt.Printf("Сервер запущен на :%s\n", port)
+	fmt.Printf("Сервер запущен на http://localhost:%s\n", port)
 	if err := http.ListenAndServe(":"+port, nil); err != nil {
 		fmt.Println("Ошибка запуска сервера:", err)
 	}
