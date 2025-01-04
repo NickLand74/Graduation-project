@@ -39,11 +39,6 @@ func main() {
 	dbFile := filepath.Join(".", "scheduler.db")
 	fmt.Println("Путь к базе данных:", dbFile)
 
-	_, err := os.Stat(dbFile)
-	if err != nil {
-		log.Println("Файл базы данных не найден:", err)
-	}
-
 	db, err := sql.Open("sqlite3", dbFile)
 	if err != nil {
 		log.Fatal(err)
@@ -51,7 +46,7 @@ func main() {
 	defer db.Close()
 
 	if err := createSchedulerTable(db); err != nil {
-		log.Fatal(err)
+		log.Fatal("Ошибка создания таблицы scheduler:", err)
 	}
 
 	http.HandleFunc("/api/task", func(w http.ResponseWriter, r *http.Request) {
@@ -78,12 +73,12 @@ func main() {
 
 func createSchedulerTable(db *sql.DB) error {
 	createTableSQL := `CREATE TABLE IF NOT EXISTS scheduler (
-	   id INTEGER PRIMARY KEY AUTOINCREMENT,
-	   name TEXT NOT NULL,
-	   date TEXT NOT NULL,
-	   comment TEXT,
-	   repeat TEXT
-	   );`
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        title TEXT NOT NULL,
+        date TEXT NOT NULL,
+        comment TEXT,
+        repeat TEXT
+    );`
 	_, err := db.Exec(createTableSQL)
 	return err
 }
@@ -113,7 +108,9 @@ func handleAddTask(w http.ResponseWriter, r *http.Request, db *sql.DB) {
 		return
 	}
 
-	today := time.Now()
+	now := time.Now()
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+
 	if parsedDate.Before(today) {
 		if task.Repeat == "" {
 			task.Date = today.Format("20060102")
@@ -128,8 +125,7 @@ func handleAddTask(w http.ResponseWriter, r *http.Request, db *sql.DB) {
 		}
 	}
 
-	// Добавление задачи в базу данных
-	res, err := db.Exec("INSERT INTO tasks (name, date, comment, repeat) VALUES (?, ?, ?, ?)", task.Title, task.Date, task.Comment, task.Repeat)
+	res, err := db.Exec("INSERT INTO scheduler (title, date, comment, repeat) VALUES (?, ?, ?, ?)", task.Title, task.Date, task.Comment, task.Repeat)
 	if err != nil {
 		log.Printf("Ошибка добавления задачи: Title=%s, Date=%s, Comment=%s, Repeat=%s, error: %v", task.Title, task.Date, task.Comment, task.Repeat, err)
 		w.WriteHeader(http.StatusInternalServerError)
@@ -146,7 +142,6 @@ func handleAddTask(w http.ResponseWriter, r *http.Request, db *sql.DB) {
 
 	json.NewEncoder(w).Encode(TaskResponse{ID: int(id)})
 	log.Printf("Задача добавлена: ID=%d, Title=%s", id, task.Title)
-
 }
 
 func handleGetTask(w http.ResponseWriter, r *http.Request, db *sql.DB) {
@@ -158,7 +153,7 @@ func handleGetTask(w http.ResponseWriter, r *http.Request, db *sql.DB) {
 	}
 
 	var task Task
-	err := db.QueryRow("SELECT name, date, comment, repeat FROM tasks WHERE id = ?", taskId).Scan(&task.Title, &task.Date, &task.Comment, &task.Repeat)
+	err := db.QueryRow("SELECT title, date, comment, repeat FROM scheduler WHERE id = ?", taskId).Scan(&task.Title, &task.Date, &task.Comment, &task.Repeat)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			w.WriteHeader(http.StatusNotFound)
@@ -188,7 +183,7 @@ func handleDeleteTask(w http.ResponseWriter, r *http.Request, db *sql.DB) {
 	}
 
 	// Удаление задачи из базы данных
-	res, err := db.Exec("DELETE FROM tasks WHERE id = ?", taskId)
+	res, err := db.Exec("DELETE FROM scheduler WHERE id = ?", taskId)
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		json.NewEncoder(w).Encode(TaskResponse{Error: "Ошибка удаления задачи"})
@@ -228,29 +223,28 @@ func NextDate(now time.Time, date string, repeat string) (string, error) {
 		if err != nil || days <= 0 || days > 400 {
 			return "", fmt.Errorf("недопустимый интервал дней: %s", daysStr)
 		}
-		nextDate = nextDate.AddDate(0, 0, days)
+		for !nextDate.After(now) {
+			nextDate = nextDate.AddDate(0, 0, days)
+		}
 
 	case repeat == "y":
-		if parsedDate.Month() == 2 && parsedDate.Day() == 29 {
-			// Если дата - 29 февраля, добавляем 1 год
-			nextDate = parsedDate.AddDate(1, 0, 0)
-			if !isLeapYear(nextDate.Year()) {
-				nextDate = time.Date(nextDate.Year(), 2, 28, 0, 0, 0, 0, nextDate.Location())
-			}
-		} else {
-			nextDate = parsedDate.AddDate(1, 0, 0)
-			if parsedDate.Day() == 31 {
-				// Переход на конец месяца
-				nextDate = time.Date(nextDate.Year(), nextDate.Month()+1, 0, 0, 0, 0, 0, nextDate.Location())
+		for !nextDate.After(now) {
+			if nextDate.Month() == 2 && nextDate.Day() == 29 {
+				nextDate = nextDate.AddDate(1, 0, 0)
+				if !isLeapYear(nextDate.Year()) {
+					nextDate = time.Date(nextDate.Year(), 2, 28, 0, 0, 0, 0, nextDate.Location())
+				}
+			} else {
+				nextDate = nextDate.AddDate(1, 0, 0)
+				if parsedDate.Day() == 31 {
+					// Переход на конец месяца
+					nextDate = time.Date(nextDate.Year(), nextDate.Month()+1, 0, 0, 0, 0, 0, nextDate.Location())
+				}
 			}
 		}
 
 	default:
 		return "", fmt.Errorf("неподдерживаемый формат: %s", repeat)
-	}
-
-	if !nextDate.After(now) {
-		return "", fmt.Errorf("следующая дата должна быть больше текущей")
 	}
 
 	return nextDate.Format("20060102"), nil

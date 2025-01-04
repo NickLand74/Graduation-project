@@ -119,7 +119,7 @@ func TestDatabaseInitialization(t *testing.T) {
 	}
 
 	// Создание таблицы
-	createTableSQL := `CREATE TABLE IF NOT EXISTS tasks (
+	createTableSQL := `CREATE TABLE IF NOT EXISTS scheduler  (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         name TEXT NOT NULL,
         completed BOOLEAN NOT NULL DEFAULT FALSE
