@@ -27,6 +27,15 @@ type TaskResponse struct {
 	Error string `json:"error,omitempty"`
 }
 
+// Дополнительная структура для вывода задачи списком (все поля - строки)
+type TaskForJSON struct {
+	ID      string `json:"id"`
+	Date    string `json:"date"`
+	Title   string `json:"title"`
+	Comment string `json:"comment"`
+	Repeat  string `json:"repeat"`
+}
+
 func main() {
 	port := os.Getenv("TODO_PORT")
 	if port == "" {
@@ -63,6 +72,16 @@ func main() {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			json.NewEncoder(w).Encode(TaskResponse{Error: "Метод не поддерживается"})
 		}
+	})
+
+	// Новый маршрут для списка задач
+	http.HandleFunc("/api/tasks", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			json.NewEncoder(w).Encode(map[string]string{"error": "Метод не поддерживается"})
+			return
+		}
+		handleGetTasks(w, r, db)
 	})
 
 	fmt.Printf("Сервер запущен на http://localhost:%s\n", port)
@@ -125,9 +144,11 @@ func handleAddTask(w http.ResponseWriter, r *http.Request, db *sql.DB) {
 		}
 	}
 
-	res, err := db.Exec("INSERT INTO scheduler (title, date, comment, repeat) VALUES (?, ?, ?, ?)", task.Title, task.Date, task.Comment, task.Repeat)
+	res, err := db.Exec("INSERT INTO scheduler (title, date, comment, repeat) VALUES (?, ?, ?, ?)",
+		task.Title, task.Date, task.Comment, task.Repeat)
 	if err != nil {
-		log.Printf("Ошибка добавления задачи: Title=%s, Date=%s, Comment=%s, Repeat=%s, error: %v", task.Title, task.Date, task.Comment, task.Repeat, err)
+		log.Printf("Ошибка добавления задачи: Title=%s, Date=%s, Comment=%s, Repeat=%s, error: %v",
+			task.Title, task.Date, task.Comment, task.Repeat, err)
 		w.WriteHeader(http.StatusInternalServerError)
 		json.NewEncoder(w).Encode(TaskResponse{Error: "Ошибка добавления задачи в базу данных"})
 		return
@@ -153,7 +174,8 @@ func handleGetTask(w http.ResponseWriter, r *http.Request, db *sql.DB) {
 	}
 
 	var task Task
-	err := db.QueryRow("SELECT title, date, comment, repeat FROM scheduler WHERE id = ?", taskId).Scan(&task.Title, &task.Date, &task.Comment, &task.Repeat)
+	err := db.QueryRow("SELECT title, date, comment, repeat FROM scheduler WHERE id = ?", taskId).
+		Scan(&task.Title, &task.Date, &task.Comment, &task.Repeat)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			w.WriteHeader(http.StatusNotFound)
@@ -182,7 +204,6 @@ func handleDeleteTask(w http.ResponseWriter, r *http.Request, db *sql.DB) {
 		return
 	}
 
-	// Удаление задачи из базы данных
 	res, err := db.Exec("DELETE FROM scheduler WHERE id = ?", taskId)
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -203,6 +224,110 @@ func handleDeleteTask(w http.ResponseWriter, r *http.Request, db *sql.DB) {
 	}
 
 	json.NewEncoder(w).Encode(TaskResponse{ID: taskId})
+}
+
+func handleGetTasks(w http.ResponseWriter, r *http.Request, db *sql.DB) {
+	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
+
+	const limitDefault = 50
+
+	search := r.URL.Query().Get("search")
+	search = strings.TrimSpace(search)
+
+	var (
+		query string
+		args  []any
+	)
+
+	if search == "" {
+		// без параметра search — все задачи, сортируем и лимитируем
+		query = `
+			SELECT id, date, title, comment, repeat
+			FROM scheduler
+			ORDER BY date ASC
+			LIMIT ?
+		`
+		args = append(args, limitDefault)
+	} else {
+		// проверяем, не является ли search датой формата dd.mm.yyyy
+		parsedDate, err := time.Parse("02.01.2006", search)
+		if err == nil {
+			// значит ищем конкретную дату
+			dateForDB := parsedDate.Format("20060102")
+			query = `
+				SELECT id, date, title, comment, repeat
+				FROM scheduler
+				WHERE date = ?
+				ORDER BY date ASC
+				LIMIT ?
+			`
+			args = append(args, dateForDB, limitDefault)
+		} else {
+			// ищем подстроку в title или comment
+			likePattern := fmt.Sprintf("%%%s%%", search)
+			query = `
+				SELECT id, date, title, comment, repeat
+				FROM scheduler
+				WHERE title LIKE ? OR comment LIKE ?
+				ORDER BY date ASC
+				LIMIT ?
+			`
+			args = append(args, likePattern, likePattern, limitDefault)
+		}
+	}
+
+	rows, err := db.Query(query, args...)
+	if err != nil {
+		log.Println("Ошибка при запросе списка задач:", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Ошибка получения списка задач"})
+		return
+	}
+	defer rows.Close()
+
+	var tasks []TaskForJSON
+
+	for rows.Next() {
+		var (
+			id      int
+			dateStr string
+			title   string
+			comment string
+			repeat  string
+		)
+
+		if err := rows.Scan(&id, &dateStr, &title, &comment, &repeat); err != nil {
+			log.Println("Ошибка чтения данных задачи:", err)
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]string{"error": "Ошибка чтения задач из базы"})
+			return
+		}
+
+		tasks = append(tasks, TaskForJSON{
+			ID:      strconv.Itoa(id),
+			Date:    dateStr,
+			Title:   title,
+			Comment: comment,
+			Repeat:  repeat,
+		})
+	}
+	if err := rows.Err(); err != nil {
+		log.Println("Ошибка итерации по строкам:", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Ошибка итерации по задачам"})
+		return
+	}
+
+	// Если ничего не нашли, tasks == nil, сделаем пустой срез
+	if tasks == nil {
+		tasks = []TaskForJSON{}
+	}
+
+	// Формируем результат
+	result := map[string]any{
+		"tasks": tasks,
+	}
+	json.NewEncoder(w).Encode(result)
 }
 
 func NextDate(now time.Time, date string, repeat string) (string, error) {
@@ -232,13 +357,19 @@ func NextDate(now time.Time, date string, repeat string) (string, error) {
 			if nextDate.Month() == 2 && nextDate.Day() == 29 {
 				nextDate = nextDate.AddDate(1, 0, 0)
 				if !isLeapYear(nextDate.Year()) {
-					nextDate = time.Date(nextDate.Year(), 2, 28, 0, 0, 0, 0, nextDate.Location())
+					nextDate = time.Date(
+						nextDate.Year(), 2, 28,
+						0, 0, 0, 0, nextDate.Location(),
+					)
 				}
 			} else {
 				nextDate = nextDate.AddDate(1, 0, 0)
+				// обработка 31-го числа, если нужно
 				if parsedDate.Day() == 31 {
-					// Переход на конец месяца
-					nextDate = time.Date(nextDate.Year(), nextDate.Month()+1, 0, 0, 0, 0, 0, nextDate.Location())
+					nextDate = time.Date(
+						nextDate.Year(), nextDate.Month()+1, 0,
+						0, 0, 0, 0, nextDate.Location(),
+					)
 				}
 			}
 		}
