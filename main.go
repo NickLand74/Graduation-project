@@ -63,6 +63,8 @@ func main() {
 		log.Fatal("Ошибка создания таблицы scheduler:", err)
 	}
 
+	http.HandleFunc("/api/nextdate", handleNextDate)
+
 	http.HandleFunc("/api/task", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json; charset=UTF-8")
 
@@ -500,7 +502,6 @@ func handleGetTasks(w http.ResponseWriter, r *http.Request, db *sql.DB) {
 	json.NewEncoder(w).Encode(result)
 }
 
-// NextDate — вычисляет следующую дату с учётом правила повторения
 func NextDate(now time.Time, date string, repeat string) (string, error) {
 	if repeat == "" {
 		return "", fmt.Errorf("пустое правило повторения")
@@ -519,25 +520,53 @@ func NextDate(now time.Time, date string, repeat string) (string, error) {
 		if err != nil || days <= 0 || days > 400 {
 			return "", fmt.Errorf("недопустимый интервал дней: %s", daysStr)
 		}
+
+		// ШАГ 1: всегда двигаем дату "хотя бы на 1 раз"
+		nextDate = nextDate.AddDate(0, 0, days)
+
+		// ШАГ 2: пока nextDate <= now, двигаем ещё
 		for !nextDate.After(now) {
 			nextDate = nextDate.AddDate(0, 0, days)
 		}
 
 	case repeat == "y":
+		// Сначала "один шаг" вперёд от исходной даты
+		if nextDate.Month() == 2 && nextDate.Day() == 29 {
+			// если это было 29 февраля, добавим год:
+			nextDate = nextDate.AddDate(1, 0, 0)
+			if !isLeapYear(nextDate.Year()) {
+				// смещаемся на 1 марта, если год не високосный
+				nextDate = time.Date(
+					nextDate.Year(), 3, 1,
+					0, 0, 0, 0, nextDate.Location(),
+				)
+			}
+		} else {
+			// обычный год
+			nextDate = nextDate.AddDate(1, 0, 0)
+			// Если день был 31, можно применить логику "не вывалиться из месяца"
+			if parsedDate.Day() == 31 {
+				nextDate = time.Date(
+					nextDate.Year(), nextDate.Month()+1, 0,
+					0, 0, 0, 0, nextDate.Location(),
+				)
+			}
+		}
+
+		// А теперь добавляем ещё год, пока дата не станет > now
 		for !nextDate.After(now) {
-			// обрабатываем 29 февраля
+			// повторяем ту же логику 29 февраля / 31-е
 			if nextDate.Month() == 2 && nextDate.Day() == 29 {
 				nextDate = nextDate.AddDate(1, 0, 0)
 				if !isLeapYear(nextDate.Year()) {
 					nextDate = time.Date(
-						nextDate.Year(), 2, 28,
+						nextDate.Year(), 3, 1,
 						0, 0, 0, 0, nextDate.Location(),
 					)
 				}
 			} else {
 				nextDate = nextDate.AddDate(1, 0, 0)
-				// обработка 31-го числа (опционально)
-				if parsedDate.Day() == 31 {
+				if nextDate.Day() == 31 {
 					nextDate = time.Date(
 						nextDate.Year(), nextDate.Month()+1, 0,
 						0, 0, 0, 0, nextDate.Location(),
@@ -556,4 +585,33 @@ func NextDate(now time.Time, date string, repeat string) (string, error) {
 // isLeapYear — проверяет, является ли год високосным
 func isLeapYear(year int) bool {
 	return (year%4 == 0 && year%100 != 0) || (year%400 == 0)
+}
+
+func handleNextDate(w http.ResponseWriter, r *http.Request) {
+	// Тест ожидает обычный текст (не JSON):
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+
+	nowStr := r.URL.Query().Get("now")
+	dateStr := r.URL.Query().Get("date")
+	repeatStr := r.URL.Query().Get("repeat")
+
+	// Парсим nowStr как "20060102"
+	nowTime, err := time.Parse("20060102", nowStr)
+	if err != nil {
+		// Если невалидная дата now => возвращаем пустую строку
+		// (согласно логике теста "если ошибка => пустая строка")
+		w.Write([]byte(""))
+		return
+	}
+
+	// Вызываем вашу функцию NextDate
+	next, err := NextDate(nowTime, dateStr, repeatStr)
+	if err != nil {
+		// Если NextDate вернула ошибку => тоже пустую строку
+		w.Write([]byte(""))
+		return
+	}
+
+	// Если всё ок, возвращаем найденную дату
+	w.Write([]byte(next))
 }
