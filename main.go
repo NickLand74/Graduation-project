@@ -1,7 +1,10 @@
 package main
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,6 +18,160 @@ import (
 
 	_ "github.com/mattn/go-sqlite3"
 )
+
+// SigninRequest — модель для чтения JSON при POST /api/signin
+type SigninRequest struct {
+	Password string `json:"password"`
+}
+
+// SigninResponse — ответ при успешной аутентификации
+type SigninResponse struct {
+	Token string `json:"token,omitempty"`
+	Error string `json:"error,omitempty"`
+}
+
+// makeJWT формирует упрощённый JWT-токен на основе текущего пароля
+func makeJWT(password string) (string, error) {
+	if password == "" {
+		return "", errors.New("пустой пароль")
+	}
+	// 1) Заголовок (header)
+	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"HS256","typ":"JWT"}`))
+
+	// 2) Полезная нагрузка (payload): здесь запишем хеш пароля
+	//    например, sha256 от (password + некий secret)
+	hash := makePasswordHash(password)
+	payload := base64.RawURLEncoding.EncodeToString([]byte(fmt.Sprintf(`{"pwdhash":"%s"}`, hash)))
+
+	// 3) Подпись (signature): HMAC-SHA256(header+"."+payload, secretKey)
+	//    Для наглядности возьмём secretKey = "MySuperSecret"
+	secretKey := []byte("MySuperSecret")
+	h := hmac.New(sha256.New, secretKey)
+	data := header + "." + payload
+	h.Write([]byte(data))
+	sign := base64.RawURLEncoding.EncodeToString(h.Sum(nil))
+
+	// Собираем всё вместе: header.payload.signature
+	token := header + "." + payload + "." + sign
+	return token, nil
+}
+
+// validateJWT проверяет токен, что там &laquo;pwdhash&raquo; совпадает с актуальным паролем
+func validateJWT(token string, password string) bool {
+	// Разбиваем на 3 части
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		return false
+	}
+	header, payload, sign := parts[0], parts[1], parts[2]
+
+	// 1) Проверим подпись
+	secretKey := []byte("MySuperSecret")
+	h := hmac.New(sha256.New, secretKey)
+	h.Write([]byte(header + "." + payload))
+	expectedSign := base64.RawURLEncoding.EncodeToString(h.Sum(nil))
+	if sign != expectedSign {
+		return false
+	}
+
+	// 2) Раскодируем payload
+	payBytes, err := base64.RawURLEncoding.DecodeString(payload)
+	if err != nil {
+		return false
+	}
+	// Ожидаем что-то вида {"pwdhash":"..."}
+	type Payload struct {
+		PwdHash string `json:"pwdhash"`
+	}
+	var p Payload
+	if err := json.Unmarshal(payBytes, &p); err != nil {
+		return false
+	}
+
+	// 3) Проверяем, совпадает ли p.PwdHash с актуальной хэш-строкой
+	currentHash := makePasswordHash(password)
+	if p.PwdHash != currentHash {
+		return false
+	}
+	return true
+}
+
+// makePasswordHash — примитивный sha256 от (пароль + "salt")
+func makePasswordHash(password string) string {
+	salt := "Salt777" // Для наглядности
+	sum := sha256.Sum256([]byte(password + salt))
+	return base64.RawURLEncoding.EncodeToString(sum[:])
+}
+
+func handleSignin(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
+
+	passEnv := os.Getenv("TODO_PASSWORD")
+	// Если переменная окружения пустая => аутентификация не нужна
+	// Но по условию, если TODO_PASSWORD пуст, формы нет и вовзращаем ошибку
+	if passEnv == "" {
+		json.NewEncoder(w).Encode(SigninResponse{
+			Error: "Пароль не установлен (TODO_PASSWORD пуст)",
+		})
+		return
+	}
+
+	// Читаем JSON: {"password":"..."}
+	var req SigninRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(SigninResponse{Error: "Ошибка десериализации JSON"})
+		return
+	}
+
+	// Сравниваем с passEnv
+	if req.Password != passEnv {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(SigninResponse{Error: "Неверный пароль"})
+		return
+	}
+
+	// Если совпадает => генерируем JWT и возвращаем
+	token, err := makeJWT(passEnv)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(SigninResponse{Error: "Ошибка генерации токена"})
+		return
+	}
+
+	// Успешная аутентификация => {"token":"..."}
+	json.NewEncoder(w).Encode(SigninResponse{Token: token})
+}
+
+// Для запуска сервера с паролем 1234 - выполните команду в терминале: TODO_PASSWORD=1234 go run main.go
+func auth(next http.HandlerFunc) http.HandlerFunc {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		passEnv := os.Getenv("TODO_PASSWORD")
+		// Если пароль не задан — аутентификация не нужна, пропускаем
+		if passEnv == "" {
+			next(w, r)
+			return
+		}
+
+		// Если пароль есть => нужно проверить cookie token
+		c, err := r.Cookie("token")
+		if err != nil {
+			// Нет куки => 401
+			http.Error(w, "Authentification required", http.StatusUnauthorized)
+			return
+		}
+
+		token := c.Value
+		if !validateJWT(token, passEnv) {
+			// Невалидный токен => 401
+			http.Error(w, "Authentification required", http.StatusUnauthorized)
+			return
+		}
+
+		// Всё ок => вызываем целевой хендлер
+		next(w, r)
+	})
+}
 
 // Task — структура для приёма и сохранения задач.
 // Поле ID не было раньше, но для обновления задачи оно необходимо.
@@ -63,6 +220,23 @@ func main() {
 	if err := createSchedulerTable(db); err != nil {
 		log.Fatal("Ошибка создания таблицы scheduler:", err)
 	}
+	// добавил временную проверку пароля. были проблемы с установкой пароля
+	pass := os.Getenv("TODO_PASSWORD")
+	fmt.Printf("DEBUG: TODO_PASSWORD=[%s]\n", pass)
+	if pass == "" {
+		log.Println("Пароль не установлен (TODO_PASSWORD пуст)")
+	} else {
+		log.Println("Пароль установлен:", pass)
+	}
+
+	// Маршрут для входа (авторизации)
+	http.HandleFunc("/api/signin", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			handleSignin(w, r) // см. код выше
+		} else {
+			http.NotFound(w, r)
+		}
+	})
 
 	// Регистрация маршрута /api/task
 	http.HandleFunc("/api/task", func(w http.ResponseWriter, r *http.Request) {
