@@ -3,6 +3,7 @@ package main
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -63,29 +64,31 @@ func main() {
 		log.Fatal("Ошибка создания таблицы scheduler:", err)
 	}
 
-	http.HandleFunc("/api/nextdate", handleNextDate)
-
+	// Регистрация маршрута /api/task
 	http.HandleFunc("/api/task", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json; charset=UTF-8")
 
+		// Обработка различных HTTP-методов через switch
 		switch r.Method {
 		case http.MethodPost:
-			handleAddTask(w, r, db)
+			handleAddTask(w, r, db) // для POST — добавление задачи
 		case http.MethodGet:
-			handleGetTask(w, r, db)
+			handleGetTask(w, r, db) // для GET — получение информации о задаче
 		case http.MethodPut:
-			handleUpdateTask(w, r, db)
+			handleUpdateTask(w, r, db) // для PUT — обновление задачи
 		case http.MethodDelete:
-			handleDeleteTask(w, r, db)
+			handleDeleteTask(w, r, db) // для DELETE — удаление задачи
 		default:
+			// Если метод не поддерживается — возвращаем ошибку 405
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			json.NewEncoder(w).Encode(TaskResponse{Error: "Метод не поддерживается"})
 		}
 	})
 
-	// Дополнительный маршрут /api/tasks для списка задач (поиск и фильтры)
+	// Дополнительный маршрут /api/tasks для работы со списком задач (поиск и фильтры)
 	http.HandleFunc("/api/tasks", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
+			// Метод не поддерживается
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			json.NewEncoder(w).Encode(map[string]string{"error": "Метод не поддерживается"})
 			return
@@ -93,6 +96,20 @@ func main() {
 		handleGetTasks(w, r, db)
 	})
 
+	// Регистрация маршрута для /api/nextdate
+	http.HandleFunc("/api/nextdate", handleNextDate)
+
+	// Регистрация маршрута /api/task/done — POST для отметки о выполнении
+	http.HandleFunc("/api/task/done", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			handleDoneTask(w, r, db)
+		} else {
+			// На все остальные методы отдаём 404 (или 405)
+			http.NotFound(w, r)
+		}
+	})
+
+	// Запуск HTTP-сервера на указанном порту
 	fmt.Printf("Сервер запущен на http://localhost:%s\n", port)
 	if err := http.ListenAndServe(":"+port, nil); err != nil {
 		log.Println("Ошибка запуска сервера:", err)
@@ -361,7 +378,7 @@ func handleUpdateTask(w http.ResponseWriter, r *http.Request, db *sql.DB) {
 	json.NewEncoder(w).Encode(map[string]any{})
 }
 
-// Удаление задачи (DELETE /api/task?id=...)
+// удаление задачи
 func handleDeleteTask(w http.ResponseWriter, r *http.Request, db *sql.DB) {
 	taskIdStr := r.URL.Query().Get("id")
 	if taskIdStr == "" {
@@ -377,6 +394,7 @@ func handleDeleteTask(w http.ResponseWriter, r *http.Request, db *sql.DB) {
 		return
 	}
 
+	// Пытаемся удалить
 	res, err := db.Exec("DELETE FROM scheduler WHERE id = ?", taskId)
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -387,7 +405,7 @@ func handleDeleteTask(w http.ResponseWriter, r *http.Request, db *sql.DB) {
 	rowsAffected, err := res.RowsAffected()
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(TaskResponse{Error: "Ошибка получения результатов удаления"})
+		json.NewEncoder(w).Encode(TaskResponse{Error: "Ошибка получения результата удаления"})
 		return
 	}
 	if rowsAffected == 0 {
@@ -396,7 +414,84 @@ func handleDeleteTask(w http.ResponseWriter, r *http.Request, db *sql.DB) {
 		return
 	}
 
-	json.NewEncoder(w).Encode(TaskResponse{ID: taskId})
+	// Если всё ОК — возвращаем пустой JSON
+	json.NewEncoder(w).Encode(map[string]any{})
+}
+
+// handleDoneTask обрабатывает POST /api/task/done?id=<id>
+func handleDoneTask(w http.ResponseWriter, r *http.Request, db *sql.DB) {
+	// 1. Получаем ID задачи из query
+	taskIdStr := r.URL.Query().Get("id")
+	if taskIdStr == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(TaskResponse{Error: "Не указан ID задачи"})
+		return
+	}
+
+	taskID, err := strconv.Atoi(taskIdStr)
+	if err != nil || taskID <= 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(TaskResponse{Error: "Некорректный формат ID задачи"})
+		return
+	}
+
+	// 2. Читаем задачу из БД
+	var t Task
+	err = db.QueryRow(`
+        SELECT id, date, title, comment, repeat 
+        FROM scheduler 
+        WHERE id = ?
+    `, taskID).Scan(&t.ID, &t.Date, &t.Title, &t.Comment, &t.Repeat)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			w.WriteHeader(http.StatusNotFound)
+			json.NewEncoder(w).Encode(TaskResponse{Error: "Задача не найдена"})
+		} else {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(TaskResponse{Error: "Ошибка чтения задачи из БД"})
+		}
+		return
+	}
+
+	// 3. Если repeat пустой => задача одноразовая => УДАЛЯЕМ
+	if t.Repeat == "" {
+		// удаляем
+		_, err := db.Exec("DELETE FROM scheduler WHERE id = ?", taskID)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(TaskResponse{Error: "Ошибка удаления задачи из БД"})
+			return
+		}
+		// Возвращаем пустой JSON {}
+		json.NewEncoder(w).Encode(map[string]any{})
+		return
+	}
+
+	// 4. Иначе задача периодическая => считаем новую дату через NextDate()
+	now := time.Now()
+	newDate, err := NextDate(now, t.Date, t.Repeat)
+	if err != nil {
+		// Если по каким-то причинам NextDate не смогла вычислить (например, repeat кривой),
+		// вернём ошибку. Хотя по тестам это вряд ли случится, так как repeat уже валидный.
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(TaskResponse{Error: "Ошибка вычисления даты повторения"})
+		return
+	}
+
+	// 5. Обновляем date в БД
+	_, err = db.Exec(`
+        UPDATE scheduler 
+        SET date = ? 
+        WHERE id = ?
+    `, newDate, taskID)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(TaskResponse{Error: "Ошибка обновления задачи в БД"})
+		return
+	}
+
+	// Успех => пустой JSON {}
+	json.NewEncoder(w).Encode(map[string]any{})
 }
 
 // handleGetTasks — получение списка задач (сортировка, поиск и т. д.)
