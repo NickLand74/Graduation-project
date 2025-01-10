@@ -143,7 +143,6 @@ func handleSignin(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(SigninResponse{Token: token})
 }
 
-// Для запуска сервера с паролем 1234 - выполните команду в терминале: TODO_PASSWORD=1234 go run main.go
 func auth(next http.HandlerFunc) http.HandlerFunc {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		passEnv := os.Getenv("TODO_PASSWORD")
@@ -187,16 +186,6 @@ type Task struct {
 type TaskResponse struct {
 	ID    int    `json:"id,omitempty"`
 	Error string `json:"error,omitempty"`
-}
-
-// TaskDetail — структура для возврата задачи целиком (с ID в виде строки).
-// Можно было бы вернуть ID как int, но тесты (и фронт) обычно ожидают строку.
-type TaskDetail struct {
-	ID      string `json:"id"` // строка, чтобы JSON всегда был в нужном формате
-	Date    string `json:"date"`
-	Title   string `json:"title"`
-	Comment string `json:"comment"`
-	Repeat  string `json:"repeat"`
 }
 
 func main() {
@@ -291,17 +280,21 @@ func main() {
 }
 
 // Создание таблицы, если ещё не создана
+// Вместо TEXT делаем VARCHAR(255) что бы ограничить длину полей
 func createSchedulerTable(db *sql.DB) error {
-	createTableSQL := `CREATE TABLE IF NOT EXISTS scheduler (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        title TEXT NOT NULL,
-        date TEXT NOT NULL,
-        comment TEXT,
-        repeat TEXT
-    );`
+	createTableSQL := `
+        CREATE TABLE IF NOT EXISTS scheduler (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            title VARCHAR(255) NOT NULL,
+            date VARCHAR(8) NOT NULL,     -- "YYYYMMDD" (8 символов)
+            comment VARCHAR(255),
+            repeat VARCHAR(50)
+        );`
 	_, err := db.Exec(createTableSQL)
 	return err
 }
+
+const DateFormat = "20060102"
 
 // Добавление новой задачи (POST)
 func handleAddTask(w http.ResponseWriter, r *http.Request, db *sql.DB) {
@@ -319,10 +312,10 @@ func handleAddTask(w http.ResponseWriter, r *http.Request, db *sql.DB) {
 	}
 
 	if task.Date == "" {
-		task.Date = time.Now().Format("20060102")
+		task.Date = time.Now().Format(DateFormat)
 	}
 
-	parsedDate, err := time.Parse("20060102", task.Date)
+	parsedDate, err := time.Parse(DateFormat, task.Date)
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(TaskResponse{Error: "Неверный формат даты"})
@@ -335,7 +328,7 @@ func handleAddTask(w http.ResponseWriter, r *http.Request, db *sql.DB) {
 	if parsedDate.Before(today) {
 		if task.Repeat == "" {
 			// Если нет повторения, просто устанавливаем дату на сегодня
-			task.Date = today.Format("20060102")
+			task.Date = today.Format(DateFormat)
 		} else {
 			// Если есть повторение, двигаем дату с помощью NextDate
 			nextDate, err := NextDate(today, task.Date, task.Repeat)
@@ -406,8 +399,8 @@ func handleGetTask(w http.ResponseWriter, r *http.Request, db *sql.DB) {
 	}
 
 	// Возвращаем в удобном формате JSON с ID как строкой
-	td := TaskDetail{
-		ID:      strconv.Itoa(id),
+	td := Task{
+		ID:      id,
 		Date:    date,
 		Title:   title,
 		Comment: comment,
@@ -474,12 +467,12 @@ func handleUpdateTask(w http.ResponseWriter, r *http.Request, db *sql.DB) {
 
 	// 5. Если дата пустая => ставим today's date (по условию теста)
 	if incoming.Date == "" {
-		incoming.Date = time.Now().Format("20060102")
+		incoming.Date = time.Now().Format(DateFormat)
 		log.Printf("DEBUG: date was empty => set to today %q\n", incoming.Date)
 	}
 
 	// 6. Парсим дату
-	parsedDate, err := time.Parse("20060102", incoming.Date)
+	parsedDate, err := time.Parse(DateFormat, incoming.Date)
 	if err != nil {
 		log.Printf("DEBUG: invalid date => %q\n", incoming.Date)
 		w.WriteHeader(http.StatusBadRequest)
@@ -693,9 +686,9 @@ func handleGetTasks(w http.ResponseWriter, r *http.Request, db *sql.DB) {
 		args = append(args, limitDefault)
 	} else {
 		// проверим, не является ли search датой формата dd.mm.yyyy
-		parsedDate, err := time.Parse("02.01.2006", search)
+		parsedDate, err := time.Parse(DateFormat, search)
 		if err == nil {
-			dateForDB := parsedDate.Format("20060102")
+			dateForDB := parsedDate.Format(DateFormat)
 			query = `
 				SELECT id, date, title, comment, repeat
 				FROM scheduler
@@ -727,7 +720,7 @@ func handleGetTasks(w http.ResponseWriter, r *http.Request, db *sql.DB) {
 	}
 	defer rows.Close()
 
-	var tasks []TaskDetail
+	var tasks []Task
 
 	for rows.Next() {
 		var (
@@ -745,8 +738,8 @@ func handleGetTasks(w http.ResponseWriter, r *http.Request, db *sql.DB) {
 			return
 		}
 
-		tasks = append(tasks, TaskDetail{
-			ID:      strconv.Itoa(id),
+		tasks = append(tasks, Task{
+			ID:      id,
 			Date:    dateStr,
 			Title:   title,
 			Comment: comment,
@@ -762,7 +755,7 @@ func handleGetTasks(w http.ResponseWriter, r *http.Request, db *sql.DB) {
 
 	// Если ничего не нашли, tasks == nil => пустой срез
 	if tasks == nil {
-		tasks = []TaskDetail{}
+		tasks = []Task{}
 	}
 
 	result := map[string]any{
@@ -775,7 +768,7 @@ func NextDate(now time.Time, date string, repeat string) (string, error) {
 	if repeat == "" {
 		return "", fmt.Errorf("пустое правило повторения")
 	}
-	parsedDate, err := time.Parse("20060102", date)
+	parsedDate, err := time.Parse(DateFormat, date)
 	if err != nil {
 		return "", fmt.Errorf("некорректная дата: %s", date)
 	}
@@ -848,7 +841,7 @@ func NextDate(now time.Time, date string, repeat string) (string, error) {
 		return "", fmt.Errorf("неподдерживаемый формат: %s", repeat)
 	}
 
-	return nextDate.Format("20060102"), nil
+	return nextDate.Format(DateFormat), nil
 }
 
 // isLeapYear — проверяет, является ли год високосным
@@ -865,7 +858,7 @@ func handleNextDate(w http.ResponseWriter, r *http.Request) {
 	repeatStr := r.URL.Query().Get("repeat")
 
 	// Парсим nowStr как "20060102"
-	nowTime, err := time.Parse("20060102", nowStr)
+	nowTime, err := time.Parse(DateFormat, nowStr)
 	if err != nil {
 		// Если невалидная дата now => возвращаем пустую строку
 		// (согласно логике теста "если ошибка => пустая строка")

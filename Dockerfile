@@ -8,7 +8,11 @@
 
     COPY . .
 
-    RUN CGO_ENABLED=0 GOOS=linux go build -o main main.go
+    ENV CGO_ENABLED=0
+
+    ENV GOOS=linux
+
+    RUN go build -o main main.go
 
     FROM scratch
     
@@ -18,6 +22,6 @@
     
     COPY --from=builder /app/web /app/web
     
-    EXPOSE 7540
+    EXPOSE ${APP_PORT:-7540}
     
     CMD ["/app/main"]
